@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Dependencies (Forge submodules / lib in each workshop)
+lib
