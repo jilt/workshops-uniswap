@@ -1,66 +1,102 @@
-## Foundry
+## What does this hook do
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+this hook transforms a standard Uniswap pool into a loyalty-driven ecosystem where trading volume is converted into social status and on-chain collectibles.
 
-Foundry consists of:
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+## Available hook functions
 
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```
+beforeInitialize
+afterInitialize
+ 
+beforeAddLiquidity
+beforeRemoveLiquidity
+afterAddLiquidity
+afterRemoveLiquidity
+ 
+beforeSwap
+afterSwap
+ 
+beforeDonate
+afterDonate
+ 
+beforeSwapReturnDelta
+afterSwapReturnDelta
+afterAddLiquidityReturnDelta
+afterRemoveLiquidityReturnDelta
 ```
 
-### Test
+## main part of the lesson used
 
-```shell
-$ forge test
+In order to know who much ETH are spent during the swap we need `balanceDelta` struct from `afterSwap` hook
+
+```solidity
+beforeSwap(
+	address sender, 
+	PoolKey calldata key, 
+	SwapParams calldata params, 
+	bytes calldata hookData
+)
+ 
+afterSwap(
+	address sender,
+	PoolKey calldata key, 
+	SwapParams calldata params, 
+	BalanceDelta delta, 
+	bytes calldata hookData
+)
+```
+## Deploy the hook
+
+### Set your environment variables
+```
+export POOL_MANAGER=0x... 
+export RPC_URL=http://localhost:8545
+export PRIVATE_KEY=0x...
+```
+### Run the deployment
+```
+forge script script/DeployPointsHook.s.sol --rpc-url $RPC_URL --private-key $PRIVATE_KEY --broadcast
 ```
 
-### Format
+## How This Hook is Built
 
-```shell
-$ forge fmt
-```
+### The Loyalty Manager, PointsHook.sol
 
-### Gas Snapshots
+It sits on top of Uniswap and watches every trade.
 
-```shell
-$ forge snapshot
-```
+**The Trigger:** It only cares when someone spends ETH to buy a Token. If you are doing any other kind of trade, it ignores you.
+**The Identity Check (hookData):** Before it does any math, it checks if the trade included the buyer's address. If the address is missing, it "reverts" (cancels the transaction) immediately. This is a security and gas-saving feature—it doesn't want to waste computing power on a trade it can't reward.
+**The Reward (Cashback):** It looks at how much ETH you spent and gives you 20% of that value in Points.
+If you spend 0.5 ETH, you get 1 Point.
+These points are "Pool-Specific," meaning points earned only in the selected pool.
+**The Level-Up (Tiers):** After giving you points, it checks a leaderboard. If your total points or your rank are high enough, it automatically updates the erc1155 metadata for you with your user's level:
+Basic: The starting level.
+Rare: For active traders.
+Legendary: For the top 3 players on the leaderboard.
 
-### Anvil
+### The Global Scoreboard MockChainlinkFunctions.sol
 
-```shell
-$ anvil
-```
+In a real-world app, calculating a "Global Rank" is too expensive to do directly on the blockchain. You would usually use a service like Chainlink to talk to an external database.
 
-### Deploy
+Since you are testing locally, this "Mock" contract acts as that external database.
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
+**The Leaderboard:** It keeps a list of the top 10 users across the whole system.
+**Rankings:** It calculates who is #1, #2, etc., based on their total points and trade volume.
+**The Connection:** When the Hook finishes a swap, it sends the data here. This contract then tells the Hook: "Hey, this user is now ranked #2 globally," which allows the Hook to decide if the user deserves a level upgrade.
 
-### Cast
+## Summary of the Flow:
+User Swaps: You buy a token with 1 ETH on Uniswap.
+Hook Wakes Up: The Hook calculates you earned 2 points.
+Points Issued: You receive 2 "Pool Points" (an ERC-1155 token).
+Scoreboard Updates: The Hook tells the Mock contract you just earned 2 points.
+Rank Check: The Mock contract sees you are now in the Top 3.
+Achievement Unlocked: The Hook sees your new rank and updates the metadata for your tokens signaling your levelling up.
 
-```shell
-$ cast <subcommand>
-```
+## Advanced Use Cases: Beyond Gamification
 
-### Help
+The pattern used in this workshop—connecting a Hook to an external data source via a Mock/Chainlink interface—isn't just for points and leaderboards. It is the foundation for sophisticated DeFi strategies:
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+*   **IL Protection:** By fetching real-time token prices from **Chainlink Oracles**, a hook can detect when a pool is being "arbitraged" (toxic flow). It can then dynamically increase fees to compensate Liquidity Providers for potential Impermanent Loss.
+*   **Automated Rebalancing:** Hooks can trigger liquidity shifts based on external market conditions. If an oracle reports a price trend change, the hook can move liquidity ranges in `beforeSwap` to ensure LPs remain profitable.
+*   **Dynamic Volatility Fees:** Using external volatility data, hooks can charge higher fees during turbulent markets and lower fees during stable periods, optimizing the pool for volume and safety.

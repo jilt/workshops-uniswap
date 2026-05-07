@@ -23,20 +23,23 @@ contract PointsHookScript is Script {
     // https://docs.uniswap.org/contracts/v4/deployments#base-sepolia-84532
     address internal constant POOL_MANAGER = 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408;
 
+    // Add the address of your deployed MockChainlinkFunctions or ILoaderboard implementation
+    address internal constant LEADERBOARD = 0x0000000000000000000000000000000000000000; // Update this!
+
     function run() external {
         uint privateKey = vm.envUint('PRIVATE_KEY');
 
         // Hook contracts must have specific flags encoded in the address
         uint160 flags = uint160(Hooks.AFTER_SWAP_FLAG);
 
-        // Mine a salt that will produce a hook address with the correct flags
-        bytes memory constructorArgs = abi.encode(POOL_MANAGER);
+        // The constructor now requires BOTH the PoolManager and the Leaderboard address
+        bytes memory constructorArgs = abi.encode(POOL_MANAGER, LEADERBOARD);
         (address hookAddress, bytes32 salt) = HookMiner.find(CREATE2_DEPLOYER, flags, type(PointsHook).creationCode, constructorArgs);
 
         vm.startBroadcast(privateKey);
 
         // Deploy the hook using CREATE2
-        PointsHook pointsHook = new PointsHook{salt: salt}(IPoolManager(POOL_MANAGER));
+        PointsHook pointsHook = new PointsHook{salt: salt}(IPoolManager(POOL_MANAGER), LEADERBOARD);
         require(address(pointsHook) == hookAddress, 'PointsHookScript: hook address mismatch');
 
         vm.stopBroadcast();

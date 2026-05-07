@@ -5,7 +5,7 @@ import {console} from "forge-std/console.sol";
 
 
 contract USDC {
-    function balanceOf(address _account) external view returns (uint256) {
+    function balanceOf(address _account) external pure returns (uint256) {
         console.log('balanceOf _account', _account);
         return 123e6;
     }

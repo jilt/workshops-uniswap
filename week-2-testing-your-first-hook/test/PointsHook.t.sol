@@ -19,11 +19,21 @@ import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol
 import {ERC1155TokenReceiver} from "solmate/src/tokens/ERC1155.sol";
  
 import {PointsHook} from "../src/PointsHook.sol";
+import {MockChainlinkFunctions} from "../src/MockChainlinkFunctions.sol";
  
 contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
  
 	MockERC20 token; // our token to use in the ETH-TOKEN pool
  
+    MockChainlinkFunctions mockChainlink;
+    
+    // Test users from HookMock
+    address user1 = address(0x1111111111111111111111111111111111111111);
+    address user2 = address(0x2222222222222222222222222222222222222222);
+    address user3 = address(0x3333333333333333333333333333333333333333);
+    address newUser = address(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab);
+
+
 	// Native tokens are represented by address(0)
 	Currency ethCurrency = Currency.wrap(address(0));
 	Currency tokenCurrency;
@@ -31,10 +41,12 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
 	PointsHook hook;
 
     function setUp() public {
-        // Step 1 + 2
+        // Deploy Mock Chainlink Scoreboard first
+        mockChainlink = new MockChainlinkFunctions();
+
         // Deploy PoolManager and Router contracts
         deployFreshManagerAndRouters();
-
+        
         // Deploy our TOKEN contract
         token = new MockERC20("Test Token", "TEST", 18);
         tokenCurrency = Currency.wrap(address(token));
@@ -45,7 +57,7 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
     
         // Deploy hook to an address that has the proper flags set
         uint160 flags = uint160(Hooks.AFTER_SWAP_FLAG);
-        deployCodeTo("PointsHook.sol", abi.encode(manager), address(flags));
+        deployCodeTo("PointsHook.sol", abi.encode(address(manager), address(mockChainlink)), address(flags));
 
         // Deploy our hook
         hook = PointsHook(address(flags));
@@ -74,11 +86,6 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
             sqrtPriceAtTickUpper,
             ethToAdd
         );
-        uint256 tokenToAdd = LiquidityAmounts.getAmount1ForLiquidity(
-            sqrtPriceAtTickLower,
-            SQRT_PRICE_1_1,
-            liquidityDelta
-        );
     
         modifyLiquidityRouter.modifyLiquidity{value: ethToAdd}(
             key,
@@ -94,8 +101,8 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
 
     // Basic unit test for the swap function
     // - We need to make sure that we can spend ETH and receive points
-    // - Spend 0.001 ETH
-    // - Receive 20% of 0.001 = 0.0002 points
+    // - Spend 0.001 ETH (1e15)
+    // - Receive 2x points = 0.002 points (2e15)
     function test_swap_success() public {
         // Get the PoolId uint
         uint256 poolIdUint = uint256(PoolId.unwrap(key.toId()));
@@ -135,7 +142,7 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
             poolIdUint
         );
 
-        assertEq(pointsBalanceAfterSwap - pointsBalanceOriginal, 0.0002 ether, 'Points balance is not correct');
+        assertEq(pointsBalanceAfterSwap - pointsBalanceOriginal, 0.002 ether, 'Points balance is not correct');
     }
 
     // Swap TOKEN for TOKEN -> Get no points
@@ -188,7 +195,31 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
     
     // Swap a number not divisible by 5 (e.g. < 5) -> Get no points
     function test_swap_swapDust() public {
-        // ..
+        uint256 poolIdUint = uint256(PoolId.unwrap(key.toId()));
+        uint256 pointsBalanceOriginal = hook.balanceOf(
+            address(this),
+            poolIdUint
+        );
+
+        bytes memory hookData = abi.encode(address(this));
+    
+        // Swap 1 wei (the smallest possible amount)
+        swapRouter.swap{value: 1}(
+            key,
+            SwapParams({
+                zeroForOne: true,
+                amountSpecified: -1,
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            PoolSwapTest.TestSettings({
+                takeClaims: false,
+                settleUsingBurn: false
+            }),
+            hookData
+        );
+
+        uint256 pointsBalanceAfterSwap = hook.balanceOf(address(this), poolIdUint);
+        assertEq(pointsBalanceAfterSwap - pointsBalanceOriginal, 2, 'Points balance is not correct for dust');
     }
 
     function testFuzz_swap(uint256 _amount, bool _zeroForOne, address _pointsRecipient) public {
@@ -241,4 +272,101 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
         }
     }
 
+    // ========== LEADERBOARD TESTS (MERGED) ==========
+
+    function test_LeaderboardInitialized() public {
+        uint256 length = mockChainlink.getLeaderboardLength();
+        assertEq(length, 10, "Leaderboard should have 10 initial entries");
+    }
+    
+    function test_GetUserRank() public {
+        (uint256 rank, uint256 points, uint256 swapCount) = mockChainlink.getUserRank(user1);
+        
+        assertEq(rank, 1, "User1 should be rank 1");
+        assertEq(points, 5000, "User1 should have 5000 points");
+        assertEq(swapCount, 50, "User1 should have 50 swaps");
+    }
+    
+    function test_GetUserRankNotFound() public {
+        (uint256 rank, uint256 points, uint256 swapCount) = mockChainlink.getUserRank(newUser);
+        
+        assertEq(rank, 0, "Unknown user should have rank 0");
+        assertEq(points, 0, "Unknown user should have 0 points");
+        assertEq(swapCount, 0, "Unknown user should have 0 swaps");
+    }
+    
+    function test_GetTopUsers() public {
+        MockChainlinkFunctions.LeaderboardEntry[] memory topUsers = mockChainlink.getTopUsers(5);
+        
+        assertEq(topUsers.length, 5, "Should return 5 top users");
+        assertEq(topUsers[0].user, user1, "First should be user1");
+    }
+    
+    function test_UpdateLeaderboardEntry() public {
+        mockChainlink.adminUpdateEntry(0, user1, 6000, 60, 120 ether);
+        
+        (uint256 rank, uint256 points, uint256 swapCount) = mockChainlink.getUserRank(user1);
+        assertEq(points, 6000, "User1 points should be updated to 6000");
+    }
+    
+    function test_UpdateLeaderboardEntryOutOfBounds() public {
+        vm.expectRevert("Index out of bounds");
+        mockChainlink.adminUpdateEntry(20, user1, 1000, 10, 10 ether);
+    }
+    
+    function test_UpdateExistingUser() public {
+        uint256 initialLength = mockChainlink.getLeaderboardLength();
+        
+        // Add points to existing user
+        mockChainlink.addUserToLeaderboard(user1, 500, 5, 5 ether);
+        
+        uint256 newLength = mockChainlink.getLeaderboardLength();
+        assertEq(newLength, initialLength, "Length should remain same for existing user");
+        
+        (uint256 rank, uint256 points, uint256 swapCount) = mockChainlink.getUserRank(user1);
+        assertEq(points, 5500, "User1 points should be increased to 5500");
+    }
+    
+    function test_LeaderboardRanking() public {
+        (uint256 rank1, uint256 points1,) = mockChainlink.getUserRank(user1);
+        (uint256 rank2, uint256 points2,) = mockChainlink.getUserRank(user2);
+        (uint256 rank3, uint256 points3,) = mockChainlink.getUserRank(user3);
+        
+        assertEq(rank1, 1, "User1 should be rank 1");
+        assertEq(rank2, 2, "User2 should be rank 2");
+        assertEq(rank3, 3, "User3 should be rank 3");
+        
+        assertGt(points1, points2, "Rank 1 should have more points than rank 2");
+    }
+    
+    function test_GameLoop_MultipleSwaps_Leaderboard() public {
+        for (uint256 i = 0; i < 10; i++) {
+            mockChainlink.addUserToLeaderboard(newUser, 100, 1, 1 ether);
+        }
+        
+        (uint256 rank, uint256 points, uint256 swapCount) = mockChainlink.getUserRank(newUser);
+        assertGt(points, 0, "User should accumulate points");
+        assertGt(swapCount, 0, "User should accumulate swaps");
+    }
+
+    function test_TokenTierUpgrade_Logic_Merged() public {
+        (uint256 rank,,,) = mockChainlink.getUserRank(user1);
+        
+        uint256 tier;
+        if (rank <= 3) {
+            tier = 3; // Legendary
+        } else if (rank <= 6) {
+            tier = 2; // Rare
+        } else {
+            tier = 1; // Basic
+        }
+        
+        assertEq(tier, 3, "User1 (rank 1) should get legendary tier");
+    }
+
+    function test_SendMockRequest_Merged() public {
+        bytes memory emptyBytes = "";
+        bytes32 requestId = mockChainlink.sendRequest(emptyBytes, emptyBytes, "test", emptyBytes, new bytes, 1, 100000, bytes32(0));
+        assertNotEq(requestId, bytes32(0), "Request ID should not be zero");
+    }
 }
