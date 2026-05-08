@@ -9,9 +9,11 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {InternalSwapPool} from "../src/InternalSwapPool.sol";
+import {MockOracle} from "./MockOracle.sol";
 
 contract InternalSwapPoolTest is Test, Deployers {
     InternalSwapPool hook;
+    MockOracle mockOracle;
 
     function setUp() public {
         deployFreshManagerAndRouters();
@@ -46,6 +48,10 @@ contract InternalSwapPoolTest is Test, Deployers {
             }),
             ZERO_BYTES
         );
+
+        // Deploy and set up the Mock Oracle
+        mockOracle = new MockOracle();
+        hook.setOracle(address(mockOracle));
     }
 
     /**

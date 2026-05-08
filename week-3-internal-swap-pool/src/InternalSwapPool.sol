@@ -15,6 +15,7 @@ import {CurrencySettler} from '@uniswap/v4-core/test/utils/CurrencySettler.sol';
 import {IPoolManager} from '@uniswap/v4-core/src/interfaces/IPoolManager.sol';
 
 import {BaseHook} from 'v4-hooks-public/src/base/BaseHook.sol';
+import {IOracle} from './interfaces/IOracle.sol';
 
 
 /**
@@ -41,6 +42,9 @@ contract InternalSwapPool is BaseHook {
     /// The native token address
     address public immutable NATIVE_TOKEN;
 
+    /// The external oracle providing fair market prices
+    IOracle public oracle;
+
     /**
      * The amount of claimable tokens that are available to be `distributed` for a `PoolId`.
      *
@@ -63,6 +67,14 @@ contract InternalSwapPool is BaseHook {
      */
     constructor (address _poolManager, address _nativeToken) BaseHook(IPoolManager(_poolManager)) {
         NATIVE_TOKEN = _nativeToken;
+    }
+
+    /**
+     * Updates the oracle contract address.
+     * @param _oracle The new oracle address
+     */
+    function setOracle(address _oracle) external {
+        oracle = IOracle(_oracle);
     }
 
     /**
@@ -200,7 +212,7 @@ contract InternalSwapPool is BaseHook {
                 // this amount and then determine if we can fill in its entirety, or would require
                 // us to calculate a discounted amount.
                 (, ethOut, tokenIn, ) = SwapMath.computeSwapStep({
-                    sqrtPriceCurrentX96: sqrtPriceX96,
+                    sqrtPriceCurrentX96: priceBasis,
                     sqrtPriceTargetX96: params.sqrtPriceLimitX96,
                     liquidity: poolManager.getLiquidity(poolId),
                     amountRemaining: int(_poolFees[poolId].amount1),
@@ -270,32 +282,10 @@ contract InternalSwapPool is BaseHook {
         bytes4 selector_,
         int128 hookDeltaUnspecified_
     ) {
-        // Determine the currency that we will take our fees from
-        Currency unspecifiedCurrency = params.amountSpecified < 0 == params.zeroForOne ? key.currency1 : key.currency0;
-
-        // Capture the amount recieved from the swap
-        int128 swapAmount = params.amountSpecified < 0 == params.zeroForOne ? delta.amount1() : delta.amount0();
-
-        // Take a swap fee from the swap amount and ensure it's positive
-        // @dev This will calculate 1% of the swapAmount (user receives 99%)
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint swapFee = uint(uint128(swapAmount)) * 1 / 100;
-
-        // Deposit the fees into our internal storage (amount0 = currency0 fees, amount1 = currency1 fees)
-        // zeroForOne => unspecified is currency1 => fee in amount1; oneForZero => unspecified is currency0 => fee in amount0
-        _depositFees(
-            key,
-            params.zeroForOne ? 0 : swapFee,
-            params.zeroForOne ? swapFee : 0
-        );
-
-        // Settle the fees against the PoolManager
-        unspecifiedCurrency.take(poolManager, address(this), swapFee, false);
-
-        // Positive: hook took this amount from the pool, so the caller receives less (swapDelta - hookDelta).
-        // forge-lint: disable-next-line(unsafe-typecast)
-        hookDeltaUnspecified_ = int128(int(swapFee));
-
+        // LVR Implementation: We no longer charge a flat 1% fee. 
+        // Funding is captured in beforeSwap via price discrepancies.
+        hookDeltaUnspecified_ = 0;
+        
         // Set our selector to make it work
         selector_ = IHooks.afterSwap.selector;
     }
