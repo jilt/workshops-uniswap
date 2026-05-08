@@ -8,7 +8,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {CurrencyLibrary, Currency} from "v4-core/types/Currency.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
-import {CSMM} from "../src/CSMM.sol";
+import {CSMMHook} from "../src/CSMMHook.sol";
 import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol";
 
@@ -16,7 +16,7 @@ contract CSMMTest is Test, Deployers {
     using PoolIdLibrary for PoolId;
     using CurrencyLibrary for Currency;
 
-    CSMM hook;
+    CSMMHook hook;
 
     function setUp() public {
         deployFreshManagerAndRouters();
@@ -24,13 +24,12 @@ contract CSMMTest is Test, Deployers {
 
         address hookAddress = address(
             uint160(
-                Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
-                    Hooks.BEFORE_SWAP_FLAG |
-                    Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
             )
         );
-        deployCodeTo("CSMM.sol", abi.encode(manager), hookAddress);
-        hook = CSMM(hookAddress);
+
+        deployCodeTo("CSMMHook.sol", abi.encode(manager), hookAddress);
+        hook = CSMMHook(hookAddress);
 
         (key, ) = initPool(currency0, currency1, hook, 3000, SQRT_PRICE_1_1);
 
@@ -44,7 +43,7 @@ contract CSMMTest is Test, Deployers {
             1000 ether
         );
 
-        hook.addLiquidity(key, 1000e18);
+        hook.addLiquidity(key, 1000e18, 1000e18);
     }
 
     function test_claimTokenBalances() public view {
@@ -103,19 +102,65 @@ contract CSMMTest is Test, Deployers {
         uint balanceOfTokenAAfter = key.currency0.balanceOfSelf();
         uint balanceOfTokenBAfter = key.currency1.balanceOfSelf();
 
-        assertEq(balanceOfTokenBAfter - balanceOfTokenBBefore, 100e18);
+        // 100 In -> 1% Fee -> 99 Out
+        assertEq(balanceOfTokenBAfter - balanceOfTokenBBefore, 99e18);
         assertEq(balanceOfTokenABefore - balanceOfTokenAAfter, 100e18);
     }
 
-    function test_swap_exactOutput_zeroForOne() public {
+    function test_removeLiquidity_proportional() public {
+        uint256 lpBalance = hook.balanceOf(address(this), uint256(PoolId.unwrap(key.toId())));
+        
+        uint256 bal0Before = currency0.balanceOfSelf();
+        uint256 bal1Before = currency1.balanceOfSelf();
+
+        hook.removeLiquidity(key, lpBalance);
+
+        assertEq(currency0.balanceOfSelf() - bal0Before, 1000e18);
+        assertEq(currency1.balanceOfSelf() - bal1Before, 1000e18);
+        assertEq(hook.balanceOf(address(this), uint256(PoolId.unwrap(key.toId()))), 0);
+    }
+
+    function test_yieldAccumulation() public {
+        // 1. Initial State: Hook has 1000 of each. Total Shares = 2000.
+        // 2. Someone swaps 100 Token0 for Token1.
         PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
             takeClaims: false,
             settleUsingBurn: false
         });
 
-        // Swap exact output 100 Token A
-        uint balanceOfTokenABefore = key.currency0.balanceOfSelf();
-        uint balanceOfTokenBBefore = key.currency1.balanceOfSelf();
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: true,
+                amountSpecified: -100e18,
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            settings,
+            ZERO_BYTES
+        );
+
+        // Hook now has: 1100 Token0 and 901 Token1 (1000 - 99)
+        // Total assets value increased from 2000 to 2001
+        (uint256 assets0, uint256 assets1) = hook.totalAssets(manager, key);
+        assertEq(assets0, 1100e18);
+        assertEq(assets1, 901e18);
+
+        // 3. LP removes all shares and gets the fee profit
+        uint256 lpShares = hook.balanceOf(address(this), uint256(PoolId.unwrap(key.toId())));
+        hook.removeLiquidity(key, lpShares);
+
+        // LP receives the extra 1 token from fees (1100 + 901 = 2001 total tokens)
+        // Since we are the only LP, we get everything.
+    }
+
+    function test_revert_exactOutput() public {
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // Exact output (positive amountSpecified) should revert in our simple CSMM
+        vm.expectRevert();
         swapRouter.swap(
             key,
             SwapParams({
@@ -126,10 +171,5 @@ contract CSMMTest is Test, Deployers {
             settings,
             ZERO_BYTES
         );
-        uint balanceOfTokenAAfter = key.currency0.balanceOfSelf();
-        uint balanceOfTokenBAfter = key.currency1.balanceOfSelf();
-
-        assertEq(balanceOfTokenBAfter - balanceOfTokenBBefore, 100e18);
-        assertEq(balanceOfTokenABefore - balanceOfTokenAAfter, 100e18);
     }
 }
